@@ -37,7 +37,7 @@ get_TTP_TYPE_name = lambda h_type: TTP_TYPE[(h_type.bit_length()-1)//4][(h_type.
 
 class CONFIG():
     def __init__(self, rr_name: str):
-        _idx=rr_name.rfind('_')
+        _idx=rr_name.rfind('tgt')+4
         with open('tgtinfo/%s.info'%(rr_name[3:_idx]), 'r') as fn:
             line=fn.readline().strip('\n')
             if len(line)==0:
@@ -240,7 +240,7 @@ class Detector():
         elif edge.syscall=='shmdt':
             if proc_idx in self.to_sync and shm_idx in self.to_sync[proc_idx]:
                 self.to_sync[proc_idx].remove(shm_idx)
-            if proc_idx in from_sync and shm_idx in from_sync[proc_idx]:
+            if proc_idx in self.from_sync and shm_idx in self.from_sync[proc_idx]:
                 self.from_sync[proc_idx].remove(shm_idx)
         return
     
@@ -462,10 +462,10 @@ class Detector():
         return
     
     def run(self,  edge_idx: int, edge: dict):
-        off = self.node_set[edge.ldx].type + self.node_set[edge.rdx].type
+        offset = self.node_set[edge.ldx].type + self.node_set[edge.rdx].type
         if self.node_set[edge.ldx].type==0:
-            off += 8
-        return self.funcs[off](edge_idx, edge)
+            offset += 8
+        return self.funcs[offset](edge_idx, edge)
     
     def print_location(self, h_type: int, edge: dict):
         einfo=STRUCT([('rr_count', edge.rr_count), ('procname', edge.proc), ('proc_idx', edge.rdx)])

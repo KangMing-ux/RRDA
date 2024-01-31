@@ -1,4 +1,3 @@
-import time
 from enum import Enum
 from json import dumps
 
@@ -155,7 +154,7 @@ class EDGE_LIST():
         return
     
     def finish(self):
-        if len(self.list):
+        if len(self.list)>0:
             to_write=''
             for edge in self.list:
                 to_write+=dumps(edge)+'\n'
@@ -193,8 +192,6 @@ class ProvenanceGraph():
             print('==============================import node done...==============================')
             self.edge_fn=open('output/%s_edge.list'%(rr_name), 'r')
             self.still=True
-            # read_procs <= mmap_files | shm
-            self.from_sync=dict()
         else:
             self.node_set=dict()
             self.edge_list=EDGE_LIST(rr_name)
@@ -213,7 +210,8 @@ class ProvenanceGraph():
         node_list.sort(key=lambda node: node.idx)
         to_write=''
         for node in node_list:
-            to_write+=node.encode()+'\n'
+            to_write+=node.encode()
+            to_write+='\n'
         with open(rr_name+'_node.set', 'w') as fn:
             fn.write(to_write)
         self.edge_list.finish()
@@ -222,7 +220,6 @@ class ProvenanceGraph():
     def import_edge(self):
         assert(self.still)
         global LIST_SIZE
-        # clear previous content
         self.edge_list.clear()
         for inum in range(LIST_SIZE):
             line=self.edge_fn.readline().strip('\n')
@@ -233,8 +230,8 @@ class ProvenanceGraph():
             einfo=loads(line)
             edge=STRUCT()
             edge.update({'rr_count': einfo[0], 'proc': einfo[1], 'syscall': einfo[2], 'ldx': einfo[3], 'rdx': einfo[4]})
-            # at least one process node
-            assert(self.node_set[edge.ldx].type * self.node_set[edge.rdx].type == 0)
+            # check one of edge's node's type is process
+            assert(self.node_set[edge.ldx].type==0 or self.node_set[edge.rdx].type==0)
             self.edge_list.append(edge)
         return
     
@@ -254,7 +251,7 @@ class ProvenanceGraph():
                     dumps(h_node.dep_ttps).replace('[', '{').replace(']', '}'))
             idx_base += LIST_SIZE
         t_end=time.process_time_ns()
-        print('=======================APT detection done...time cost: %fs======================='%((t_end-t_start)/1000000000))
+        print('=======================APT detection done...time cost: %dms======================='%((t_end-t_start)//10**6))
         print('==============================locate exp of APT...===============================')
         print(detector.exp_location)
         print('===========================save hgraph to hgraph...===============================')
@@ -285,6 +282,7 @@ class ProvenanceGraph():
         return
 
 if __name__ == '__main__':
+    import time
     from sys import argv
     from json import loads
     if len(argv)==3:

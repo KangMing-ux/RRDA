@@ -1,9 +1,15 @@
 import time
 from sys import argv
 from rr_graph import *
-from rr_config import *
+from rr_config import HOOK_SHM_OFFSET
 from pandare import Panda
 from rr_syscalls2 import *
+
+####################################################################################################
+#                                                                                                  #
+####################################### PANDA INITIALIZATION #######################################
+#                                                                                                  #
+####################################################################################################
 
 if len(argv)==7:
     panda_instance=Panda(arch=argv[2], mem=argv[3], expect_prompt=None, serial_kwargs=None, \
@@ -26,10 +32,15 @@ panda_instance.load_plugin(name='osi')
 panda_instance.load_plugin(name='hooks')
 panda_instance.load_plugin(name='dynamic_symbols')
 
-prov_graph=ProvenanceGraph(argv[1])
+####################################################################################################
+#                                                                                                  #
+#################################### CODE BEGINNING (HOOK PART) ####################################
+#                                                                                                  #
+####################################################################################################
 
 # Generally, addr is a address of bytearray
 def rr_get_data(env: panda_instance.ffi.CData, addr: int, k: int=8):
+    global panda_instance
     data=b''
     # Because I don't konw data's length
     while True:
@@ -66,13 +77,13 @@ def on_rw_syscall(env: panda_instance.ffi.CData, syscall_name: str, fd: int):
         slave=PIPE_NODE(int(slave_name[12:-2]))
     else:
         slave=FILE_NODE(slave_name)
-    if success: # which means successfully parsed file descriptor fd
+    if success: # which means successfully parsed file descriptor fd to file name
         master.idx=prov_graph.review_node_idx(master)
         slave.idx=prov_graph.review_node_idx(slave)
-        if last_syscall_event!=(syscall_name, slave.idx, master.idx) and 'read' in syscall_name: # read related
+        if 'read' in syscall_name and last_syscall_event!=(syscall_name, slave.idx, master.idx): # read related
             prov_graph.edge_list.join((panda_instance.rr_get_guest_instr_count(), procname, syscall_name, slave.idx, master.idx))
             last_syscall_event=(syscall_name, slave.idx, master.idx)
-        elif last_syscall_event!=(syscall_name, master.idx, slave.idx) and 'write' in syscall_name or syscall_name=='fchmod': # write related | fchmod
+        elif ('write' in syscall_name or syscall_name=='fchmod') and last_syscall_event!=(syscall_name, master.idx, slave.idx): # write related | fchmod
             prov_graph.edge_list.join((panda_instance.rr_get_guest_instr_count(), procname, syscall_name, master.idx, slave.idx))
             last_syscall_event=(syscall_name, master.idx, slave.idx)
     return
@@ -448,19 +459,22 @@ def on_sys_fchmod_return(env: panda_instance.ffi.CData, pc: int, fd: int, mode: 
 
 # Considering that the execve syscall never returns when it success
 @panda_instance.ppp('syscalls2', 'on_sys_execve_enter')
-def on_sys_execve_enter(env: panda_instance.ffi.CData, pc: int, fileptr: int, argv: int, envp: int):
+def on_sys_execve_enter(env: panda_instance.ffi.CData, pc: int, fileptr: int, _argv: int, envp: int):
     global pwdinfo
-    offset=0
+    if argv[2]=='i386':
+        offset=4
+    else:
+        offset=8
     pwd=''
     while envp>0:
-        data=panda_instance.virtual_memory_read(env, envp+offset, 4, fmt='bytearray')
+        data=panda_instance.virtual_memory_read(env, envp+offset, offset, fmt='bytearray')
         addr=int.from_bytes(data, byteorder='little')
         if addr>0:
             info=rr_get_data(env, addr).decode()
             if 'PWD' == info[:3]:
                 pwd+=info.split('=')[1]
                 break
-            offset+=4
+            envp+=offset
         else:
             break
     current=panda_instance.plugins['osi'].get_current_process(env)
@@ -508,53 +522,137 @@ def on_sys_setuid_return(env: panda_instance.ffi.CData, pc: int, uid: int):
 #  connect  accept  recv  recvfrom  recvmsg  send  sendto  sendmsg
 ##############################################################################################
 
-# net/socket.c asmlinkage long sys_socketcall(int call, unsigned long *args)
-@panda_instance.ppp('syscalls2', 'on_sys_socketcall_return')
-def on_sys_socketcall_return(env: panda_instance.ffi.CData, pc: int, callno: int, args: int):
-    global prov_graph, last_syscall_event, sockfdinfo, SOCKET_CALL, ADDRESS_FAMILY
-    retval=panda_instance.plugins['syscalls2'].get_syscall_retval(env)
-    if retval < 0:
-        return
-    if SOCKET_CALL[callno] is None:
-        return
-    data=panda_instance.virtual_memory_read(env, args, 8, fmt='bytearray')
-    sockfd=int.from_bytes(data[:4], byteorder='little', signed=False)
+def on_socketcall_ca(env: panda_instance.ffi.CData, sockfd: int, addr: int, addrlen: int):
+    global panda_instance, sockfdinfo, ADDRESS_FAMILY
+    data=panda_instance.virtual_memory_read(env, addr, addrlen, fmt='bytearray')
+    domain=int.from_bytes(data[:2], byteorder='little', signed=False)
     current=panda_instance.plugins['osi'].get_current_process(env)
-    if SOCKET_CALL[callno] == 'connect' or SOCKET_CALL[callno] == 'accept':
-        if SOCKET_CALL[callno] == 'accept':
-            sockfd=retval
-        sock_addr=int.from_bytes(data[4:], byteorder='little', signed=False)
-        if sock_addr==0:
-            return
-        data=panda_instance.virtual_memory_read(env, sock_addr, 8, fmt='bytearray')
-        sa_family=int.from_bytes(data[:2], byteorder='little', signed=False)
-        if sa_family == ADDRESS_FAMILY.AF_INET.value:
-            sockfdinfo[(current.asid, sockfd)]=SOCKET_NODE(data[4:8], data[2:4])
-        elif sa_family == ADDRESS_FAMILY.AF_UNIX.value:
-            un_path=rr_get_data(env, sock_addr+2).decode('utf8', 'ignore')
-            sockfdinfo[(current.asid, sockfd)]=FILE_NODE(un_path)
-    else:
-        if (current.asid, sockfd) in sockfdinfo:
-            master=PROC_NODE(current.asid)
-            procname=panda_instance.ffi.string(current.name).decode('utf8', 'ignore')
-            slave=sockfdinfo[(current.asid, sockfd)]
-            master.idx=prov_graph.review_node_idx(master)
-            slave.idx=prov_graph.review_node_idx(slave)
-            syscall_name=SOCKET_CALL[callno]
-            if last_syscall_event!=(syscall_name, master.idx, slave.idx) and syscall_name[:4]=='send': # send related
-                prov_graph.edge_list.join((panda_instance.rr_get_guest_instr_count(), procname, syscall_name, master.idx, slave.idx))
-                last_syscall_event=(syscall_name, master.idx, slave.idx)
-            elif last_syscall_event!=(syscall_name, slave.idx, master.idx) and syscall_name[:4]=='recv': # recv related:
-                prov_graph.edge_list.join((panda_instance.rr_get_guest_instr_count(), procname, syscall_name, slave.idx, master.idx))
-                last_syscall_event=(syscall_name, slave.idx, master.idx)
+    if domain == ADDRESS_FAMILY.AF_INET.value:
+        sockfdinfo[(current.asid, sockfd)]=SOCKET_NODE(data[4:8], data[2:4])
+    elif domain == ADDRESS_FAMILY.AF_UNIX.value:
+        sockfdinfo[(current.asid, sockfd)]=FILE_NODE(data.decode('utf8', 'ignore'))
     return
 
-t_start=time.process_time_ns()
+def on_socketcall_sr(current:panda_instance.ffi.CData, sockfd: int, syscall_name: str):
+    global panda_instance, sockfdinfo, prov_graph, last_syscall_event
+    master=PROC_NODE(current.asid)
+    procname=panda_instance.ffi.string(current.name).decode('utf8', 'ignore')
+    slave=sockfdinfo[(current.asid, sockfd)]
+    master.idx=prov_graph.review_node_idx(master)
+    slave.idx=prov_graph.review_node_idx(slave)
+    if last_syscall_event!=(syscall_name, master.idx, slave.idx) and syscall_name[:4]=='send': # send related
+        prov_graph.edge_list.join((panda_instance.rr_get_guest_instr_count(), procname, syscall_name, master.idx, slave.idx))
+        last_syscall_event=(syscall_name, master.idx, slave.idx)
+    elif last_syscall_event!=(syscall_name, slave.idx, master.idx) and syscall_name[:4]=='recv': # recv related:
+        prov_graph.edge_list.join((panda_instance.rr_get_guest_instr_count(), procname, syscall_name, slave.idx, master.idx))
+        last_syscall_event=(syscall_name, slave.idx, master.idx)
+    return
 
-panda_instance.run_replay(argv[1])
+if argv[2]=='i386':
+    # net/socket.c asmlinkage long sys_socketcall(int call, unsigned long *args)
+    @panda_instance.ppp('syscalls2', 'on_sys_socketcall_return')
+    def on_sys_socketcall_return(env: panda_instance.ffi.CData, pc: int, callno: int, args: int):
+        global prov_graph, last_syscall_event, sockfdinfo, SOCKET_CALL, ADDRESS_FAMILY
+        retval=panda_instance.plugins['syscalls2'].get_syscall_retval(env)
+        if retval < 0 or SOCKET_CALL[callno] is None:
+            return
+        data=panda_instance.virtual_memory_read(env, args, 8, fmt='bytearray')
+        sockfd=int.from_bytes(data[:4], byteorder='little', signed=False)
+        current=panda_instance.plugins['osi'].get_current_process(env)
+        if SOCKET_CALL[callno] == 'connect' or SOCKET_CALL[callno] == 'accept':
+            if SOCKET_CALL[callno] == 'accept':
+                sockfd=retval
+            addr=int.from_bytes(data[4:], byteorder='little', signed=False)
+            if addr==0:
+                return
+            data=panda_instance.virtual_memory_read(env, addr, 8, fmt='bytearray')
+            domain=int.from_bytes(data[:2], byteorder='little', signed=False)
+            if domain == ADDRESS_FAMILY.AF_INET.value:
+                sockfdinfo[(current.asid, sockfd)]=SOCKET_NODE(data[4:8], data[2:4])
+            elif domain == ADDRESS_FAMILY.AF_UNIX.value:
+                un_path=rr_get_data(env, addr+2).decode('utf8', 'ignore')
+                sockfdinfo[(current.asid, sockfd)]=FILE_NODE(un_path)
+        else:
+            if (current.asid, sockfd) in sockfdinfo:
+                master=PROC_NODE(current.asid)
+                procname=panda_instance.ffi.string(current.name).decode('utf8', 'ignore')
+                slave=sockfdinfo[(current.asid, sockfd)]
+                master.idx=prov_graph.review_node_idx(master)
+                slave.idx=prov_graph.review_node_idx(slave)
+                syscall_name=SOCKET_CALL[callno]
+                if last_syscall_event!=(syscall_name, master.idx, slave.idx) and syscall_name[:4]=='send': # send related
+                    prov_graph.edge_list.join((panda_instance.rr_get_guest_instr_count(), procname, syscall_name, master.idx, slave.idx))
+                    last_syscall_event=(syscall_name, master.idx, slave.idx)
+                elif last_syscall_event!=(syscall_name, slave.idx, master.idx) and syscall_name[:4]=='recv': # recv related:
+                    prov_graph.edge_list.join((panda_instance.rr_get_guest_instr_count(), procname, syscall_name, slave.idx, master.idx))
+                    last_syscall_event=(syscall_name, slave.idx, master.idx)
+        return
+else:
+    @panda_instance.ppp('syscalls2', 'on_sys_connect_return')
+    def on_sys_connect_return(env: panda_instance.ffi.CData, pc: int, sockfd: int, addr: int, addrlen: int):
+        retval=panda_instance.plugins['syscalls2'].get_syscall_retval(env)
+        if retval>=0 and addr>0 and addrlen>0:
+            on_socketcall_ca(env, sockfd, addr, addrlen)
+        return
+    
+    @panda_instance.ppp('syscalls2', 'on_sys_accept_return')
+    def on_sys_accept_return(env: panda_instance.ffi.CData, pc: int, sockfd: int, addr: int, addrlen_ptr: int):
+        retval=panda_instance.plugins['syscalls2'].get_syscall_retval(env)
+        data=panda_instance.virtual_memory_read(env, addrlen_ptr, 8, fmt='bytearray')
+        addrlen=int.from_bytes(data, byteorder='little', signed=False)
+        if retval>=0 and addr>0 and addrlen>0:
+            on_socketcall_ca(env, sockfd, addr, addrlen)
+        return
+    
+    @panda_instance.ppp('syscalls2', 'on_sys_accept4_return')
+    def on_sys_accept4_return(env: panda_instance.ffi.CData, pc: int, sockfd: int, addr: int, addrlen_ptr: int, flag: int):
+        retval=panda_instance.plugins['syscalls2'].get_syscall_retval(env)
+        data=panda_instance.virtual_memory_read(env, addrlen_ptr, 8, fmt='bytearray')
+        addrlen=int.from_bytes(data, byteorder='little', signed=False)
+        if retval>=0 and addr>0 and addrlen>0:
+            on_socketcall_ca(env, sockfd, addr, addrlen)
+        return
 
-t_end=time.process_time_ns()
+    @panda_instance.ppp('syscalls2', 'on_sys_sendto_return')
+    def on_sys_sendto_return(env: panda_instance.ffi.CData, pc: int, sockfd: int, buf: int, buflen: int, flag: int, to: int, tolen: int):
+        global sockfdinfo
+        retval=panda_instance.plugins['syscalls2'].get_syscall_retval(env)
+        current=panda_instance.plugins['osi'].get_current_process(env)
+        if retval>=0 and (current.asid, sockfd) in sockfdinfo:
+            on_socketcall_sr(current, sockfd, 'sendto')
+        return
+    
+    @panda_instance.ppp('syscalls2', 'on_sys_sendmsg_return')
+    def on_sys_sendmsg_return(env: panda_instance.ffi.CData, pc: int, sockfd: int, msg: int, flag: int):
+        global sockfdinfo
+        retval=panda_instance.plugins['syscalls2'].get_syscall_retval(env)
+        current=panda_instance.plugins['osi'].get_current_process(env)
+        if retval>=0 and (current.asid, sockfd) in sockfdinfo:
+            on_socketcall_sr(current, sockfd, 'sendmsg')
+        return
+    
+    @panda_instance.ppp('syscalls2', 'on_sys_recvfrom_return')
+    def on_sys_recvfrom_return(env: panda_instance.ffi.CData, pc: int, sockfd: int, buf: int, buflen: int, flag: int, to: int, tolen: int):
+        global sockfdinfo
+        retval=panda_instance.plugins['syscalls2'].get_syscall_retval(env)
+        current=panda_instance.plugins['osi'].get_current_process(env)
+        if retval>=0 and (current.asid, sockfd) in sockfdinfo:
+            on_socketcall_sr(current, sockfd, 'recvfrom')
+        return
+    
+    @panda_instance.ppp('syscalls2', 'on_sys_recvmsg_return')
+    def on_sys_recvmsg_return(env: panda_instance.ffi.CData, pc: int, sockfd: int, msg: int, flag: int):
+        global sockfdinfo
+        retval=panda_instance.plugins['syscalls2'].get_syscall_retval(env)
+        current=panda_instance.plugins['osi'].get_current_process(env)
+        if retval>=0 and (current.asid, sockfd) in sockfdinfo:
+            on_socketcall_sr(current, sockfd, 'recvmsg')
+        return
 
-print('running time cost: %fs'%((t_end-t_start)/1000000000))
-
-prov_graph.save(argv[1])
+if __name__ == '__main__':
+    prov_graph=ProvenanceGraph(argv[1])
+    t_start=time.process_time()
+    panda_instance.run_replay(argv[1])
+    t_end=time.process_time()
+    print('running time cost: %.1fs'%(t_end-t_start))
+    prov_graph.save(argv[1])

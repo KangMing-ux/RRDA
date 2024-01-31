@@ -3,7 +3,7 @@ HOOK_SHM_OFFSET=(
     None,
     None,
     ('/lib/libc-2.3.2.so', 934752, 934848),
-    (),#TGT_3
+    None
 )
 
 # nm -D `find /lib/ -name 'libc.so.*'` | grep 'T malloc$' | awk '{{print $1}}'
@@ -12,15 +12,15 @@ HOOK_SHM_OFFSET=(
 HOOK_MF_OFFSET=(
     None,
     None,
-    ('/lib/libc-2.3.2.so', 470400, 472432, 471040, 471504, 470848), # ('/lib/libc-2.3.2.so', 494720),
-    (), # TGT_3
+    ('/lib/libc-2.3.2.so', 470400, 472432, 471040, 471504, 470848),
+    None
 )
 
 ANALYSIS_RANGE={
     #rr_name -> (asid, rr_start, rr_end)
     'rr_tgt2_test': (933318656, 0, 130261762),
     'rr_tgt2_apt1': (921120768, 3687312973, 3705872226),
-    'rr_tgt2_calloc': (926310400, 0, 12299040),
+    'rr_tgt2_ELECTRICSLIDE_as1': (914288640, 1383797001, 1409868968),
     'rr_tgt2_calloc_1031_0644': (926294016, 0, 9582722),
     'rr_tgt2_calloc_1031_0912': (926277632, 0, 3901935),
     'rr_tgt2_calloc_strcat_111': (926232576, 8864339, 9312805),

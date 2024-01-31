@@ -119,7 +119,7 @@ class MemoryBlock():
         self.active_chunk_list=None
         self.inactive_chunk_list=None
     
-    def en_activable(self, chunk_addr: int, chunk_tail: int):
+    def on_alloc(self, chunk_addr: int, chunk_tail: int):
         self.range.set_range(chunk_addr, chunk_tail)
         #=======================================work on active chunks=======================================#
         active_chunk=self.active_chunk_list
@@ -194,7 +194,7 @@ class MemoryBlock():
             inactive_chunk=inactive_chunk.next
         return
     
-    def dis_activable(self, chunk_addr: int, chunk_tail: int):
+    def on_free(self, chunk_addr: int, chunk_tail: int):
         self.range.set_range(chunk_addr, chunk_tail)
         #=======================================work on active chunks=======================================#
         # for active chunks, work later
@@ -248,13 +248,12 @@ class MemoryBlock():
         return there_is_double_free
     
     def check(self, addr: int, tail: int, SIZE_SZ: int):
+        err_no, inactive=0, False
         self.range.set_range(addr, tail)
         inactive_chunk=self.inactive_chunk_list
-        inactive=False
-        err_no=0 # Heap_overflow: 0x1  UAF: 0x2  Double_Free: 0x4  Stack_Overflow: 0x8
         while inactive_chunk is not None:
             if self.range.partof(inactive_chunk.mem_start, inactive_chunk.mem_end):
-                err_no |= 0x1
+                err_no=0x2
                 inactive=True
                 break
             inactive_chunk=inactive_chunk.next
@@ -263,7 +262,7 @@ class MemoryBlock():
             while active_chunk is not None:
                 if self.range.interseced(active_chunk.mem_start, active_chunk.mem_end+SIZE_SZ) and \
                 not self.range.partof(active_chunk.mem_start+SIZE_SZ, active_chunk.mem_end):
-                    err_no |= 0x1
+                    err_no=0x2
                     break
                 active_chunk=active_chunk.next
         return err_no

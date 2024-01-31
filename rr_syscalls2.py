@@ -10,7 +10,7 @@ class ADDRESS_FAMILY(Enum):
 # (syscall_name, node_idx, node_idx)
 last_syscall_event=None
 
-# (asid, sockfd) => (ip, port)/unix_path
+# (asid, sockfd) => (ip, port) | unix_path
 sockfdinfo=dict()
 
 # (asid, shmaddr) => shmid | (asid, mapaddr) => filename
